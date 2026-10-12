@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "app.loopkeep",
-      "versionCode": 2,
+      "versionCode": 3,
       "adaptiveIcon": {
         "backgroundColor": "#1D4ED8",
         "foregroundImage": "./assets/android-icon-foreground.png",
