@@ -47,6 +47,8 @@ export default function ScanScreen({ navigation, route }: ScanScreenProps) {
   const [permission, requestPermission] = useCameraPermissions();
   const [torch, setTorch] = useState(false);
   const [working, setWorking] = useState(false);
+  // Set when the camera can't start, e.g. a tablet or Chromebook with no back camera.
+  const [cameraUnavailable, setCameraUnavailable] = useState(false);
   const { markReplacedWithPrice, priceSheet } = useMarkReplaced();
   // onBarcodeScanned fires repeatedly while a code is in frame; handle one.
   const handled = useRef(false);
@@ -151,6 +153,26 @@ export default function ScanScreen({ navigation, route }: ScanScreenProps) {
     );
   }
 
+  if (cameraUnavailable) {
+    return (
+      <SafeAreaView style={styles.center}>
+        <Ionicons name="videocam-off-outline" size={56} color={colors.textSecondary} />
+        <Text style={styles.permTitle}>No camera available</Text>
+        <Text style={styles.permBody}>
+          This device's camera can't be used for scanning. You can still add and update items by hand.
+        </Text>
+        {mode === 'find' && (
+          <Pressable style={styles.permButton} onPress={() => navigation.replace('AddEditItem')}>
+            <Text style={styles.permButtonText}>Add an item</Text>
+          </Pressable>
+        )}
+        <Pressable style={styles.permSkip} onPress={() => navigation.goBack()}>
+          <Text style={styles.permSkipText}>Go back</Text>
+        </Pressable>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <View style={styles.cameraContainer}>
       <CameraView
@@ -159,6 +181,7 @@ export default function ScanScreen({ navigation, route }: ScanScreenProps) {
         enableTorch={torch}
         barcodeScannerSettings={{ barcodeTypes: BARCODE_TYPES }}
         onBarcodeScanned={working ? undefined : onBarcodeScanned}
+        onMountError={() => setCameraUnavailable(true)}
       />
       <SafeAreaView style={styles.overlay} pointerEvents="box-none">
         <View style={styles.topBar}>
