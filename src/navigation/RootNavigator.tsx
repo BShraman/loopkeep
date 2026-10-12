@@ -18,24 +18,40 @@ import {
   BottomTabBarButtonProps,
 } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import HomeScreen from '../screens/HomeScreen';
 import CalendarScreen from '../screens/CalendarScreen';
 import AddEditItemScreen from '../screens/AddEditItemScreen';
 import ItemDetailScreen from '../screens/ItemDetailScreen';
 import SettingsScreen from '../screens/SettingsScreen';
+import ScanScreen from '../screens/ScanScreen';
+import SpendingScreen from '../screens/SpendingScreen';
+import { Category } from '../types/Item';
 import { useTheme } from '../theme/ThemeContext';
 
 export type TabParamList = {
   Dashboard: undefined;
+  Spending: undefined;
   Add: undefined;
   Calendar: undefined;
+  Settings: undefined;
+};
+
+/** What a barcode scan hands to the Add/Edit form. */
+export type ScanResult = {
+  barcode: string;
+  name?: string;
+  category?: Category;
+  brand?: string;
+  // How the online lookup went: details found, nothing found, or lookup switched off.
+  lookup?: 'found' | 'none' | 'off';
 };
 
 export type RootStackParamList = {
   Tabs: NavigatorScreenParams<TabParamList> | undefined;
-  AddEditItem: { itemId?: string } | undefined;
+  AddEditItem: { itemId?: string; scan?: ScanResult } | undefined;
   ItemDetail: { itemId: string };
-  Settings: undefined;
+  Scan: { mode: 'find' | 'attach'; itemId?: string };
 };
 
 // Screens inside the tabs can navigate both within the tabs and up to the root stack.
@@ -47,7 +63,15 @@ export type CalendarScreenProps = CompositeScreenProps<
   BottomTabScreenProps<TabParamList, 'Calendar'>,
   NativeStackScreenProps<RootStackParamList>
 >;
-export type SettingsScreenProps = NativeStackScreenProps<RootStackParamList, 'Settings'>;
+export type SettingsScreenProps = CompositeScreenProps<
+  BottomTabScreenProps<TabParamList, 'Settings'>,
+  NativeStackScreenProps<RootStackParamList>
+>;
+export type ScanScreenProps = NativeStackScreenProps<RootStackParamList, 'Scan'>;
+export type SpendingScreenProps = CompositeScreenProps<
+  BottomTabScreenProps<TabParamList, 'Spending'>,
+  NativeStackScreenProps<RootStackParamList>
+>;
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<TabParamList>();
@@ -80,6 +104,9 @@ function AddPlaceholder() {
 
 function MainTabs() {
   const { colors } = useTheme();
+  // A fixed height overrides the navigator's own safe-area padding, which pushed
+  // the tab labels under the home indicator / gesture bar. Add the inset back.
+  const { bottom } = useSafeAreaInsets();
   return (
     <Tab.Navigator
       screenOptions={{
@@ -89,8 +116,8 @@ function MainTabs() {
         tabBarStyle: {
           backgroundColor: colors.card,
           borderTopColor: colors.border,
-          height: 60,
-          paddingBottom: 6,
+          height: 66 + bottom,
+          paddingBottom: 8 + bottom,
           paddingTop: 6,
         },
       }}
@@ -101,6 +128,15 @@ function MainTabs() {
         options={{
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="home-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tab.Screen
+        name="Spending"
+        component={SpendingScreen}
+        options={{
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="stats-chart-outline" size={size} color={color} />
           ),
         }}
       />
@@ -125,6 +161,19 @@ function MainTabs() {
         options={{
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="calendar-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tab.Screen
+        name="Settings"
+        component={SettingsScreen}
+        options={{
+          headerShown: true,
+          headerStyle: { backgroundColor: colors.background },
+          headerShadowVisible: false,
+          headerTintColor: colors.text,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="settings-outline" size={size} color={color} />
           ),
         }}
       />
@@ -190,7 +239,11 @@ export default function RootNavigator() {
           })}
         />
         <Stack.Screen name="ItemDetail" component={ItemDetailScreen} options={{ title: 'Details' }} />
-        <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
+        <Stack.Screen
+          name="Scan"
+          component={ScanScreen}
+          options={{ headerShown: false, presentation: 'fullScreenModal' }}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );

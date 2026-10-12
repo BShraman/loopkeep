@@ -1,29 +1,54 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { format } from 'date-fns';
 import { HomeScreenProps } from '../navigation/RootNavigator';
-import { getAllItems, getItemById, markReplaced } from '../db/itemsRepository';
-import { rescheduleReminderForItem } from '../notifications/notificationService';
-import { Item } from '../types/Item';
-import { getDaysUntilDue, getStatus, todayISO } from '../utils/dateCalculations';
+import { getAllItems, getAllPricedHistory } from '../db/itemsRepository';
+import { getCurrencyCode } from '../services/priceSettings';
+import { Item, ReplacementHistory } from '../types/Item';
+import { todayISO } from '../utils/dateCalculations';
+import { isSnoozed, needsRestock } from '../utils/itemExtras';
+import { snoozeItem } from '../notifications/notificationService';
+import { lastPriceByItem } from '../utils/priceTrends';
+import { dashboardHeadline, HeadlineTone, ringCounts, sortByUrgency, statusOn, weekStrip } from '../utils/dashboard';
+import { useMarkReplaced } from '../hooks/useMarkReplaced';
+import ComingUpTile from '../components/ComingUpTile';
+import HealthRingCard from '../components/HealthRingCard';
 import ItemCard from '../components/ItemCard';
 import NextUpCard from '../components/NextUpCard';
-import SummaryStat from '../components/SummaryStat';
+import RestockRow from '../components/RestockRow';
+import SnoozeSheet from '../components/SnoozeSheet';
+import WeekStrip from '../components/WeekStrip';
 import { useTheme } from '../theme/ThemeContext';
 import { Palette } from '../theme/colors';
 import { makeTypography } from '../theme/typography';
+
+const MIN_COMING_UP = 4;
 
 export default function HomeScreen({ navigation }: HomeScreenProps) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [items, setItems] = useState<Item[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [showOnTrack, setShowOnTrack] = useState(false);
+  const [showLater, setShowLater] = useState(false);
+  const [pricedHistory, setPricedHistory] = useState<ReplacementHistory[]>([]);
+  const [currency, setCurrency] = useState('');
+  const { markReplacedWithPrice, priceSheet } = useMarkReplaced();
+  const [snoozeTarget, setSnoozeTarget] = useState<Item | null>(null);
 
   const loadItems = useCallback(async () => {
-    setItems(await getAllItems());
+    const [loadedItems, history, code] = await Promise.all([
+      getAllItems(),
+      getAllPricedHistory(),
+      getCurrencyCode(),
+    ]);
+    setItems(loadedItems);
+    setPricedHistory(history);
+    setCurrency(code);
+    setLoaded(true);
   }, []);
 
   useFocusEffect(
@@ -44,33 +69,58 @@ export default function HomeScreen({ navigation }: HomeScreenProps) {
   );
 
   const handleMarkReplaced = useCallback(
-    async (id: string) => {
-      await markReplaced(id, todayISO());
-      const updated = await getItemById(id);
-      if (updated) await rescheduleReminderForItem(updated);
+    async (item: Item) => {
+      // Refresh once now so the card moves on, and again after the price sheet closes.
+      await markReplacedWithPrice(item, loadItems);
       await loadItems();
     },
-    [loadItems]
+    [loadItems, markReplacedWithPrice]
   );
 
-  const { counts, hero, attention, onTrack } = useMemo(() => {
-    const sorted = [...items].sort((a, b) => getDaysUntilDue(a) - getDaysUntilDue(b));
-    const overdue = sorted.filter((i) => getStatus(i) === 'overdue');
-    const dueSoon = sorted.filter((i) => getStatus(i) === 'dueSoon');
-    const ok = sorted.filter((i) => getStatus(i) === 'ok');
+  const handleSnooze = useCallback(
+    async (days: number | null) => {
+      const target = snoozeTarget;
+      setSnoozeTarget(null);
+      if (!target) return;
+      await snoozeItem(target.id, days);
+      await loadItems();
+    },
+    [loadItems, snoozeTarget]
+  );
 
-    const needsAttention = [...overdue, ...dueSoon];
-    const heroItem = needsAttention[0] ?? null;
+  const lastPrices = useMemo(() => lastPriceByItem(pricedHistory), [pricedHistory]);
 
+  const view = useMemo(() => {
+    const today = new Date();
+    const todayIso = todayISO();
+    const sorted = sortByUrgency(items, today);
+    const needsAttention = sorted.filter((i) => statusOn(i, today) !== 'ok');
+    // Snoozed items stay in the list but never take the Next up spot.
+    const hero = needsAttention.find((i) => !isSnoozed(i, todayIso)) ?? null;
+    const overdueCount = needsAttention.filter((i) => statusOn(i, today) === 'overdue').length;
+    const heroOverdue = hero != null && statusOn(hero, today) === 'overdue';
+    const rest = sorted.filter((i) => i !== hero);
+    const attentionLeft = needsAttention.filter((i) => i !== hero).length;
+    const comingUp = rest.slice(0, Math.max(MIN_COMING_UP, attentionLeft));
     return {
-      counts: { overdue: overdue.length, dueSoon: dueSoon.length, ok: ok.length },
-      hero: heroItem,
-      attention: heroItem ? needsAttention.slice(1) : [],
-      onTrack: ok,
+      today,
+      headline: dashboardHeadline(items, today),
+      counts: ringCounts(items, today),
+      week: weekStrip(items, today),
+      hero,
+      moreOverdue: overdueCount - (heroOverdue ? 1 : 0),
+      comingUp,
+      later: rest.slice(comingUp.length),
+      restock: sorted.filter(needsRestock),
     };
   }, [items]);
 
-  const allClear = items.length > 0 && !hero;
+  const toneColor: Record<HeadlineTone, string> = {
+    overdue: colors.overdue,
+    dueSoon: colors.dueSoon,
+    ok: colors.ok,
+    neutral: colors.textSecondary,
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -80,79 +130,126 @@ export default function HomeScreen({ navigation }: HomeScreenProps) {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
         <View style={styles.headerRow}>
-          <Text style={styles.heading}>Home health</Text>
-          <Pressable
-            onPress={() => navigation.navigate('Settings')}
-            hitSlop={12}
-            accessibilityRole="button"
-            accessibilityLabel="Backup and restore"
-          >
-            <Ionicons name="settings-outline" size={22} color={colors.textSecondary} />
-          </Pressable>
+          <View style={styles.headerText}>
+            <Text style={styles.dateLine}>{format(view.today, 'EEEE, MMMM d')}</Text>
+            {loaded && (
+              <>
+                <Text style={styles.headline} accessibilityRole="header">
+                  {view.headline.title}
+                </Text>
+                <Text style={[styles.detail, { color: toneColor[view.headline.tone] }]}>
+                  {view.headline.detail}
+                </Text>
+              </>
+            )}
+          </View>
+          {Platform.OS !== 'web' && (
+            <Pressable
+              onPress={() => navigation.navigate('Scan', { mode: 'find' })}
+              style={styles.headerButton}
+              accessibilityRole="button"
+              accessibilityLabel="Scan a barcode"
+            >
+              <Ionicons name="barcode-outline" size={22} color={colors.text} />
+            </Pressable>
+          )}
         </View>
 
-        {items.length === 0 ? (
+        {loaded && items.length === 0 ? (
           <View style={styles.empty}>
             <Ionicons name="home-outline" size={48} color={colors.textSecondary} />
-            <Text style={styles.emptyText}>No items yet. Tap + to add one.</Text>
+            <Text style={styles.emptyText}>Tap + to add a filter, battery or anything you replace.</Text>
           </View>
-        ) : (
+        ) : items.length > 0 ? (
           <>
-            <View style={styles.summaryRow}>
-              <SummaryStat status="overdue" count={counts.overdue} />
-              <SummaryStat status="dueSoon" count={counts.dueSoon} />
-              <SummaryStat status="ok" count={counts.ok} />
-            </View>
+            <WeekStrip days={view.week} onPressDay={() => navigation.navigate('Calendar')} />
 
-            {hero && (
+            <HealthRingCard counts={view.counts} />
+
+            {view.hero && (
               <>
                 <Text style={styles.sectionLabel}>Next up</Text>
                 <NextUpCard
-                  item={hero}
-                  onPress={() => openItem(hero.id)}
-                  onMarkReplaced={() => handleMarkReplaced(hero.id)}
+                  item={view.hero}
+                  moreOverdue={view.moreOverdue}
+                  onPress={() => openItem(view.hero!.id)}
+                  onMarkReplaced={() => handleMarkReplaced(view.hero!)}
+                  onSnooze={() => setSnoozeTarget(view.hero)}
+                  lastPrice={lastPrices.get(view.hero.id)}
+                  currency={currency}
                 />
               </>
             )}
 
-            {allClear && (
-              <View style={styles.allClear}>
-                <Ionicons name="checkmark-done-circle-outline" size={40} color={colors.ok} />
-                <Text style={styles.allClearText}>All caught up — nothing due right now.</Text>
-              </View>
+            {view.comingUp.length > 0 && (
+              <>
+                <Text style={styles.sectionLabel}>Coming up</Text>
+                <View style={styles.grid}>
+                  {view.comingUp.map((item) => (
+                    <ComingUpTile
+                      key={item.id}
+                      item={item}
+                      today={view.today}
+                      onPress={() => openItem(item.id)}
+                    />
+                  ))}
+                </View>
+              </>
             )}
 
-            {attention.length > 0 && (
+            {view.restock.length > 0 && (
               <>
-                <Text style={styles.sectionLabel}>Needs attention</Text>
-                {attention.map((item) => (
-                  <ItemCard key={item.id} item={item} onPress={() => openItem(item.id)} />
+                <Text style={styles.sectionLabel}>Buy spares</Text>
+                {view.restock.map((item) => (
+                  <RestockRow
+                    key={item.id}
+                    item={item}
+                    lastPrice={lastPrices.get(item.id)}
+                    currency={currency}
+                    onPress={() => openItem(item.id)}
+                  />
                 ))}
               </>
             )}
 
-            {onTrack.length > 0 && (
+            {view.later.length > 0 && (
               <>
                 <Pressable
                   style={styles.collapseHeader}
-                  onPress={() => setShowOnTrack((v) => !v)}
+                  onPress={() => setShowLater((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: showLater }}
                 >
-                  <Text style={styles.sectionLabel}>On track ({onTrack.length})</Text>
+                  <Text style={styles.sectionLabel}>Later ({view.later.length})</Text>
                   <Ionicons
-                    name={showOnTrack ? 'chevron-up' : 'chevron-down'}
+                    name={showLater ? 'chevron-up' : 'chevron-down'}
                     size={18}
                     color={colors.textSecondary}
                   />
                 </Pressable>
-                {showOnTrack &&
-                  onTrack.map((item) => (
-                    <ItemCard key={item.id} item={item} onPress={() => openItem(item.id)} />
+                {showLater &&
+                  view.later.map((item) => (
+                    <ItemCard
+                      key={item.id}
+                      item={item}
+                      onPress={() => openItem(item.id)}
+                      lastPrice={lastPrices.get(item.id)}
+                      currency={currency}
+                    />
                   ))}
               </>
             )}
           </>
-        )}
+        ) : null}
       </ScrollView>
+      {priceSheet}
+      <SnoozeSheet
+        visible={snoozeTarget != null}
+        itemName={snoozeTarget?.name ?? ''}
+        snoozed={snoozeTarget ? isSnoozed(snoozeTarget, todayISO()) : false}
+        onPick={handleSnooze}
+        onDismiss={() => setSnoozeTarget(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -160,60 +257,79 @@ export default function HomeScreen({ navigation }: HomeScreenProps) {
 const makeStyles = (colors: Palette) => {
   const typography = makeTypography(colors);
   return StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  scroll: {
-    flex: 1,
-  },
-  content: {
-    padding: 16,
-    paddingBottom: 96,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  heading: {
-    ...typography.title,
-    fontSize: 24,
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 20,
-  },
-  sectionLabel: {
-    ...typography.label,
-    color: colors.textSecondary,
-    marginTop: 8,
-    marginBottom: 10,
-  },
-  collapseHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 12,
-  },
-  allClear: {
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 24,
-  },
-  allClearText: {
-    ...typography.bodySecondary,
-    textAlign: 'center',
-  },
-  empty: {
-    alignItems: 'center',
-    marginTop: 80,
-    gap: 12,
-  },
-  emptyText: {
-    ...typography.bodySecondary,
-  },
+    container: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    scroll: {
+      flex: 1,
+    },
+    content: {
+      padding: 20,
+      paddingBottom: 40,
+      gap: 14,
+    },
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 12,
+      marginBottom: 4,
+    },
+    headerText: {
+      flex: 1,
+    },
+    dateLine: {
+      ...typography.label,
+      color: colors.textSecondary,
+    },
+    headline: {
+      fontSize: 24,
+      fontWeight: '700',
+      color: colors.text,
+      marginTop: 4,
+      lineHeight: 30,
+    },
+    detail: {
+      fontSize: 15,
+      fontWeight: '600',
+      marginTop: 4,
+    },
+    headerButton: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: colors.card,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    sectionLabel: {
+      fontSize: 13,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+      textTransform: 'uppercase',
+      color: colors.textSecondary,
+      marginTop: 6,
+      marginBottom: -4,
+    },
+    grid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+    },
+    collapseHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      minHeight: 44,
+    },
+    empty: {
+      alignItems: 'center',
+      marginTop: 60,
+      gap: 12,
+    },
+    emptyText: {
+      ...typography.bodySecondary,
+      textAlign: 'center',
+    },
   });
 };

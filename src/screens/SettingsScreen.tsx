@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -12,6 +13,14 @@ import Constants from 'expo-constants';
 import { Ionicons } from '@expo/vector-icons';
 import { SettingsScreenProps } from '../navigation/RootNavigator';
 import { exportBackup, importBackup } from '../db/backupService';
+import { isProductLookupEnabled, setProductLookupEnabled } from '../services/productLookup';
+import {
+  getCurrencyCode,
+  isAskPriceEnabled,
+  setAskPriceEnabled,
+  setCurrencyCode,
+} from '../services/priceSettings';
+import { CURRENCIES } from '../utils/money';
 import { ThemePreference, useTheme } from '../theme/ThemeContext';
 import { Palette } from '../theme/colors';
 import { makeTypography } from '../theme/typography';
@@ -33,6 +42,32 @@ export default function SettingsScreen(_props: SettingsScreenProps) {
   const [busy, setBusy] = useState<Busy>('idle');
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [confirmVisible, setConfirmVisible] = useState(false);
+  const [lookupEnabled, setLookupEnabled] = useState(true);
+  const [askPrice, setAskPrice] = useState(true);
+  const [currency, setCurrency] = useState('');
+  const [currencyPickerVisible, setCurrencyPickerVisible] = useState(false);
+
+  useEffect(() => {
+    isProductLookupEnabled().then(setLookupEnabled);
+    isAskPriceEnabled().then(setAskPrice);
+    getCurrencyCode().then(setCurrency);
+  }, []);
+
+  const toggleAskPrice = (value: boolean) => {
+    setAskPrice(value);
+    setAskPriceEnabled(value);
+  };
+
+  const chooseCurrency = (code: string) => {
+    setCurrencyPickerVisible(false);
+    setCurrency(code);
+    setCurrencyCode(code);
+  };
+
+  const toggleLookup = (value: boolean) => {
+    setLookupEnabled(value);
+    setProductLookupEnabled(value);
+  };
 
   const handleExport = async () => {
     setFeedback(null);
@@ -60,6 +95,8 @@ export default function SettingsScreen(_props: SettingsScreenProps) {
         // User cancelled the file picker — no change, no message.
         return;
       }
+      // A backup can carry its own currency.
+      setCurrency(await getCurrencyCode());
       setFeedback({
         type: 'success',
         text: `Imported ${result.itemCount} item${result.itemCount === 1 ? '' : 's'}. Your list now matches the backup.`,
@@ -99,7 +136,8 @@ export default function SettingsScreen(_props: SettingsScreenProps) {
         <View style={styles.infoRow}>
           <Ionicons name="lock-closed-outline" size={18} color={colors.textSecondary} />
           <Text style={styles.infoText}>
-            Your data stays on this device. Nothing is sent to a server.
+            Your items stay on this device. The only thing that ever leaves it is a scanned
+            barcode number, if product lookup is on.
           </Text>
         </View>
       </View>
@@ -132,6 +170,57 @@ export default function SettingsScreen(_props: SettingsScreenProps) {
             );
           })}
         </View>
+      </View>
+
+      {/* ---------- Barcode scanning ---------- */}
+      <Text style={styles.sectionLabel}>Barcode Scanning</Text>
+      <View style={styles.card}>
+        <View style={styles.switchRow}>
+          <Text style={styles.switchLabel}>Look up product names online</Text>
+          <Switch
+            value={lookupEnabled}
+            onValueChange={toggleLookup}
+            trackColor={{ true: colors.primary }}
+            accessibilityLabel="Look up product names online"
+          />
+        </View>
+        <Text style={styles.description}>
+          When you scan a product Loopkeep doesn't know yet, it sends just the barcode number to
+          UPCitemdb to fill in the product's name. Turn this off to keep scanning fully offline;
+          barcodes you've already saved on items still match without it.
+        </Text>
+      </View>
+
+      {/* ---------- Prices ---------- */}
+      <Text style={styles.sectionLabel}>Prices</Text>
+      <View style={styles.card}>
+        <Pressable
+          style={styles.switchRow}
+          onPress={() => setCurrencyPickerVisible(true)}
+          accessibilityRole="button"
+          accessibilityLabel={`Currency, ${currency}`}
+        >
+          <Text style={styles.switchLabel}>Currency</Text>
+          <View style={styles.currencyValue}>
+            <Text style={styles.currencyCode}>{currency}</Text>
+            <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+          </View>
+        </Pressable>
+        <View style={styles.divider} />
+        <View style={styles.switchRow}>
+          <Text style={styles.switchLabel}>Ask for price after replacing</Text>
+          <Switch
+            value={askPrice}
+            onValueChange={toggleAskPrice}
+            trackColor={{ true: colors.primary }}
+            accessibilityLabel="Ask for price after replacing"
+          />
+        </View>
+        <Text style={styles.description}>
+          Prices you record build each item's price trend and the spending chart on the dashboard.
+          Changing the currency only changes the symbol shown; amounts aren't converted. You can
+          add or fix a price any time by tapping a replacement in an item's history.
+        </Text>
       </View>
 
       {/* ---------- Backup & Restore ---------- */}
@@ -197,6 +286,37 @@ export default function SettingsScreen(_props: SettingsScreenProps) {
       <Text style={styles.note}>
         Importing replaces the items currently on this device with the ones in the backup file.
       </Text>
+
+      <Modal
+        visible={currencyPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCurrencyPickerVisible(false)}
+      >
+        <Pressable style={styles.modalOverlay} onPress={() => setCurrencyPickerVisible(false)}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Currency</Text>
+            <ScrollView style={styles.currencyList}>
+              {CURRENCIES.map((c) => {
+                const selected = c.code === currency;
+                return (
+                  <Pressable
+                    key={c.code}
+                    style={({ pressed }) => [styles.currencyRow, pressed && styles.pressed]}
+                    onPress={() => chooseCurrency(c.code)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                  >
+                    <Text style={styles.currencyCode}>{c.code}</Text>
+                    <Text style={styles.currencyName}>{c.label}</Text>
+                    {selected && <Ionicons name="checkmark" size={18} color={colors.primary} />}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
 
       <Modal
         visible={confirmVisible}
@@ -286,6 +406,38 @@ const makeStyles = (colors: Palette) => {
     description: {
       ...typography.bodySecondary,
       lineHeight: 20,
+    },
+    switchRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+    },
+    switchLabel: {
+      ...typography.body,
+      flex: 1,
+    },
+    currencyValue: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+    },
+    currencyCode: {
+      ...typography.label,
+      minWidth: 40,
+    },
+    currencyList: {
+      maxHeight: 360,
+    },
+    currencyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingVertical: 10,
+    },
+    currencyName: {
+      ...typography.body,
+      flex: 1,
     },
     divider: {
       height: 1,

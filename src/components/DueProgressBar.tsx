@@ -12,13 +12,13 @@ export default function DueProgressBar({ item }: { item: Item }) {
   const { colors } = useTheme();
   const progress = getDueProgress(item);
   const statusColor = {
-    overdue: colors.overdue,
-    dueSoon: colors.dueSoon,
-    ok: colors.ok,
+    overdue: colors.ringOverdue,
+    dueSoon: colors.ringDueSoon,
+    ok: colors.ringOk,
   } as const;
   const color = statusColor[getStatus(item)];
   return (
-    <View style={[styles.track, { backgroundColor: colors.border }]} accessible accessibilityRole="progressbar">
+    <View style={[styles.track, { backgroundColor: colors.track }]} accessible accessibilityRole="progressbar">
       <View style={[styles.fill, { width: `${Math.round(progress * 100)}%`, backgroundColor: color }]} />
     </View>
   );

@@ -16,7 +16,9 @@ import {
   subMonths,
 } from 'date-fns';
 import { CalendarScreenProps } from '../navigation/RootNavigator';
-import { getAllItems } from '../db/itemsRepository';
+import { getAllItems, getAllPricedHistory } from '../db/itemsRepository';
+import { getCurrencyCode } from '../services/priceSettings';
+import { lastPriceByItem } from '../utils/priceTrends';
 import { Item } from '../types/Item';
 import { getDueDate, toISODate } from '../utils/dateCalculations';
 import { categoryColors } from '../utils/categoryIcons';
@@ -33,10 +35,14 @@ export default function CalendarScreen({ navigation }: CalendarScreenProps) {
   const [items, setItems] = useState<Item[]>([]);
   const [visibleMonth, setVisibleMonth] = useState(startOfMonth(new Date()));
   const [selectedDate, setSelectedDate] = useState(new Date());
+  const [lastPrices, setLastPrices] = useState<Map<string, number>>(new Map());
+  const [currency, setCurrency] = useState('');
 
   useFocusEffect(
     useCallback(() => {
       getAllItems().then(setItems);
+      getAllPricedHistory().then((history) => setLastPrices(lastPriceByItem(history)));
+      getCurrencyCode().then(setCurrency);
     }, [])
   );
 
@@ -151,6 +157,8 @@ export default function CalendarScreen({ navigation }: CalendarScreenProps) {
               key={item.id}
               item={item}
               onPress={() => navigation.navigate('ItemDetail', { itemId: item.id })}
+              lastPrice={lastPrices.get(item.id)}
+              currency={currency}
             />
           ))
         )}

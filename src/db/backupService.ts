@@ -4,11 +4,15 @@ import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
 import { getAllHistory, getAllItems, replaceAllData } from './itemsRepository';
 import { rescheduleAllReminders } from '../notifications/notificationService';
+import { getCurrencyCode, setCurrencyCode } from '../services/priceSettings';
 import { CATEGORIES, Category, Item, ReplacementHistory } from '../types/Item';
 
 // Bump when the backup shape changes in a way older apps can't read.
 export const BACKUP_APP_ID = 'loopkeep';
-export const BACKUP_VERSION = 1;
+// v2: history entries may carry a price (cents) and the file carries currencyCode.
+// v3: items may carry spares, reorderUrl and snoozedUntil; history entries may
+//     carry labor (cents), doneBy and note.
+export const BACKUP_VERSION = 3;
 
 export interface BackupData {
   app: typeof BACKUP_APP_ID;
@@ -16,17 +20,23 @@ export interface BackupData {
   exportedAt: string;
   items: Item[];
   history: ReplacementHistory[];
+  currencyCode?: string;
 }
 
 /** Read the full user dataset out of the database into a plain object. */
 export async function buildBackup(): Promise<BackupData> {
-  const [items, history] = await Promise.all([getAllItems(), getAllHistory()]);
+  const [items, history, currencyCode] = await Promise.all([
+    getAllItems(),
+    getAllHistory(),
+    getCurrencyCode(),
+  ]);
   return {
     app: BACKUP_APP_ID,
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     items,
     history,
+    currencyCode,
   };
 }
 
@@ -65,7 +75,19 @@ export function parseBackup(json: string): BackupData {
   const rawHistory = Array.isArray(obj.history) ? obj.history : [];
   const history = rawHistory.map(validateHistory);
 
-  return { app: BACKUP_APP_ID, version: obj.version, exportedAt: String(obj.exportedAt ?? ''), items, history };
+  const currencyCode =
+    typeof obj.currencyCode === 'string' && /^[A-Z]{3}$/.test(obj.currencyCode)
+      ? obj.currencyCode
+      : undefined;
+
+  return {
+    app: BACKUP_APP_ID,
+    version: obj.version,
+    exportedAt: String(obj.exportedAt ?? ''),
+    items,
+    history,
+    currencyCode,
+  };
 }
 
 function validateItem(raw: unknown, index: number): Item {
@@ -90,6 +112,11 @@ function validateItem(raw: unknown, index: number): Item {
     lastReplacedDate: str(r.lastReplacedDate),
     intervalDays: num(r.intervalDays, 90),
     notes: typeof r.notes === 'string' ? r.notes : undefined,
+    barcode: typeof r.barcode === 'string' && r.barcode ? r.barcode : undefined,
+    spares: typeof r.spares === 'number' && Number.isFinite(r.spares) && r.spares >= 0 ? Math.round(r.spares) : undefined,
+    reorderUrl: optionalText(r.reorderUrl),
+    snoozedUntil:
+      typeof r.snoozedUntil === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.snoozedUntil) ? r.snoozedUntil : undefined,
     reminderEnabled: r.reminderEnabled !== false,
     reminderLeadDays: num(r.reminderLeadDays, 5),
     isCustom: r.isCustom === true,
@@ -106,12 +133,26 @@ function validateHistory(raw: unknown, index: number): ReplacementHistory {
     id: typeof r.id === 'string' ? r.id : `${Date.now()}-${index}`,
     itemId: typeof r.itemId === 'string' ? r.itemId : '',
     replacedDate: typeof r.replacedDate === 'string' ? r.replacedDate : '',
+    price: optionalCents(r.price),
+    labor: optionalCents(r.labor),
+    doneBy: optionalText(r.doneBy),
+    note: optionalText(r.note),
   };
+}
+
+// A missing, negative or non-numeric amount is dropped rather than failing the restore.
+function optionalCents(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : undefined;
+}
+
+function optionalText(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v : undefined;
 }
 
 /** Overwrite the device's data with a parsed backup, then refresh reminders. */
 export async function restoreBackup(data: BackupData): Promise<void> {
   await replaceAllData(data.items, data.history);
+  if (data.currencyCode) await setCurrencyCode(data.currencyCode);
   await rescheduleAllReminders();
 }
 

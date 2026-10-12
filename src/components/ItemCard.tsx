@@ -6,15 +6,19 @@ import { dueSummary, formatDueDate, getStatus } from '../utils/dateCalculations'
 import { categoryColors, categoryIcons, categoryTint } from '../utils/categoryIcons';
 import StatusBadge from './StatusBadge';
 import DueProgressBar from './DueProgressBar';
+import LastPaid from './LastPaid';
+import ItemFlags from './ItemFlags';
 import { useTheme } from '../theme/ThemeContext';
 import { Palette } from '../theme/colors';
 
 interface Props {
   item: Item;
   onPress: () => void;
+  lastPrice?: number; // cents
+  currency?: string;
 }
 
-export default function ItemCard({ item, onPress }: Props) {
+export default function ItemCard({ item, onPress, lastPrice, currency = '' }: Props) {
   const { colors, scheme } = useTheme();
   const styles = makeStyles(colors);
   const status = getStatus(item);
@@ -32,6 +36,8 @@ export default function ItemCard({ item, onPress }: Props) {
           <Text style={styles.due}>
             {dueSummary(item)} · {formatDueDate(item)}
           </Text>
+          <LastPaid price={lastPrice} currency={currency} />
+          <ItemFlags item={item} />
         </View>
         <StatusBadge status={status} />
       </View>

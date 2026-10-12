@@ -6,7 +6,10 @@ import { Ionicons } from '@expo/vector-icons';
 import RootNavigator from './src/navigation/RootNavigator';
 import { getDatabase, getSetting, setSetting } from './src/db/database';
 import { seedIfNeeded } from './src/db/seedData';
-import { requestNotificationPermissions } from './src/notifications/notificationService';
+import {
+  requestNotificationPermissions,
+  startReminderActionHandling,
+} from './src/notifications/notificationService';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import { Palette } from './src/theme/colors';
 import { makeTypography } from './src/theme/typography';
@@ -38,6 +41,12 @@ function AppInner() {
       setReady(true);
     })();
   }, []);
+
+  // Snooze buttons on reminders; waits for the database to be open.
+  useEffect(() => {
+    if (!ready) return;
+    return startReminderActionHandling();
+  }, [ready]);
 
   const finishNotifIntro = async (enable: boolean) => {
     await setSetting(NOTIF_PROMPT_KEY, 'true');

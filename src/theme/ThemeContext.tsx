@@ -24,7 +24,9 @@ function resolve(preference: ThemePreference, system: ColorSchemeName): Resolved
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [preference, setPreferenceState] = useState<ThemePreference>('system');
-  const [systemScheme, setSystemScheme] = useState<ColorSchemeName>(Appearance.getColorScheme());
+  const [systemScheme, setSystemScheme] = useState<ColorSchemeName>(
+    Appearance.getColorScheme() ?? 'unspecified'
+  );
 
   // Load the saved preference once.
   useEffect(() => {

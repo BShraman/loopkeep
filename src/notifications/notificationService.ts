@@ -1,34 +1,65 @@
-import * as Notifications from 'expo-notifications';
+import type * as NotificationsModule from 'expo-notifications';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 import { Item } from '../types/Item';
-import { getDueDate, formatDueDate } from '../utils/dateCalculations';
+import { formatDueDate, todayISO } from '../utils/dateCalculations';
+import { needsRestock, reminderTriggerDate, snoozeDate } from '../utils/itemExtras';
 import { isExpoGo } from '../utils/appEnv';
 import {
   clearNotificationId,
   getAllItems,
+  getItemById,
   getNotificationId,
   setNotificationId,
+  setSnooze,
 } from '../db/itemsRepository';
 
-// expo-notifications is unavailable in Expo Go (Android, SDK 53+); registering
-// the handler there triggers its "removed from Expo Go" error. Skip it in Expo
-// Go — a dev/standalone build sets it up normally.
-if (!isExpoGo) {
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: false,
-      shouldSetBadge: false,
-    }),
-  });
+const REMINDER_CATEGORY = 'reminder';
+// Action buttons on a reminder: "snooze-<days>".
+const SNOOZE_ACTIONS: { days: number; title: string }[] = [
+  { days: 1, title: 'Tomorrow' },
+  { days: 3, title: 'In 3 days' },
+];
+
+// expo-notifications can't even be imported in Expo Go on Android (SDK 53+):
+// loading the module registers a push-token listener that throws "Android Push
+// notifications ... removed from Expo Go" and the app fails to start. So it is
+// required lazily, and never in Expo Go. Dev and store builds load it normally.
+let notificationsModule: typeof NotificationsModule | null = null;
+
+function getNotifications(): typeof NotificationsModule | null {
+  // Scheduling isn't available on web and throws, which would abort callers.
+  if (isExpoGo || Platform.OS === 'web') return null;
+  if (!notificationsModule) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Notifications: typeof NotificationsModule = require('expo-notifications');
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
+      }),
+    });
+    // Snooze buttons on reminders. Fire-and-forget: a failure only hides the buttons.
+    Notifications.setNotificationCategoryAsync(
+      REMINDER_CATEGORY,
+      SNOOZE_ACTIONS.map((a) => ({
+        identifier: `snooze-${a.days}`,
+        buttonTitle: a.title,
+        options: { opensAppToForeground: true },
+      }))
+    ).catch(() => {});
+    notificationsModule = Notifications;
+  }
+  return notificationsModule;
 }
 
 export async function requestNotificationPermissions(): Promise<boolean> {
   // Notifications don't work in Expo Go (Android, SDK 53+) — use a dev build.
-  if (isExpoGo) return false;
+  const Notifications = getNotifications();
+  if (!Notifications) return false;
   if (!Device.isDevice) return false;
 
   if (Platform.OS === 'android') {
@@ -46,7 +77,8 @@ export async function requestNotificationPermissions(): Promise<boolean> {
 }
 
 export async function cancelReminderForItem(itemId: string): Promise<void> {
-  if (isExpoGo) return;
+  const Notifications = getNotifications();
+  if (!Notifications) return;
   const notificationId = await getNotificationId(itemId);
   if (notificationId) {
     try {
@@ -64,22 +96,23 @@ export async function cancelReminderForItem(itemId: string): Promise<void> {
  * reminders are disabled or the reminder time is already in the past.
  */
 export async function rescheduleReminderForItem(item: Item): Promise<void> {
-  if (isExpoGo) return;
+  const Notifications = getNotifications();
+  if (!Notifications) return;
   await cancelReminderForItem(item.id);
 
   if (!item.reminderEnabled) return;
 
-  const triggerDate = getDueDate(item);
-  triggerDate.setDate(triggerDate.getDate() - item.reminderLeadDays);
-  triggerDate.setHours(9, 0, 0, 0);
-
+  // On the snooze day while snoozed, otherwise a few days before it's due.
+  const triggerDate = reminderTriggerDate(item, todayISO());
   if (triggerDate.getTime() <= Date.now()) return;
 
+  const spares = needsRestock(item) ? ' No spares left, so reorder soon.' : '';
   const notificationId = await Notifications.scheduleNotificationAsync({
     content: {
       title: `${item.name} due soon`,
-      body: `Due on ${formatDueDate(item)}. Open Loopkeep to mark it replaced.`,
+      body: `Due on ${formatDueDate(item)}. Open Loopkeep to mark it replaced.${spares}`,
       data: { itemId: item.id },
+      categoryIdentifier: REMINDER_CATEGORY,
     },
     trigger: {
       type: Notifications.SchedulableTriggerInputTypes.DATE,
@@ -100,7 +133,8 @@ export async function rescheduleReminderForItem(item: Item): Promise<void> {
  * each item is scheduled independently and errors are swallowed.
  */
 export async function rescheduleAllReminders(): Promise<void> {
-  if (isExpoGo) return;
+  const Notifications = getNotifications();
+  if (!Notifications) return;
   try {
     await Notifications.cancelAllScheduledNotificationsAsync();
   } catch {
@@ -116,4 +150,38 @@ export async function rescheduleAllReminders(): Promise<void> {
       // Skip this item's reminder; the item data itself is already saved.
     }
   }
+}
+
+/** Push an item's reminder to `days` from today, or clear the snooze with null. */
+export async function snoozeItem(itemId: string, days: number | null): Promise<void> {
+  await setSnooze(itemId, days == null ? null : snoozeDate(new Date(), days));
+  const item = await getItemById(itemId);
+  if (item) await rescheduleReminderForItem(item);
+}
+
+/**
+ * Handle taps on a reminder's snooze buttons, including the one that launched
+ * the app. Returns a cleanup function; a no-op where notifications aren't
+ * available (Expo Go, web).
+ */
+export function startReminderActionHandling(): () => void {
+  const Notifications = getNotifications();
+  if (!Notifications) return () => {};
+
+  const handle = async (response: NotificationsModule.NotificationResponse) => {
+    const match = /^snooze-(\d+)$/.exec(response.actionIdentifier);
+    const itemId = response.notification.request.content.data?.itemId;
+    if (!match || typeof itemId !== 'string') return;
+    await snoozeItem(itemId, Number(match[1]));
+    await Notifications.dismissNotificationAsync(response.notification.request.identifier).catch(() => {});
+    await Notifications.clearLastNotificationResponseAsync().catch(() => {});
+  };
+
+  const subscription = Notifications.addNotificationResponseReceivedListener((r) => {
+    handle(r).catch(() => {});
+  });
+  Notifications.getLastNotificationResponseAsync()
+    .then((r) => (r ? handle(r) : undefined))
+    .catch(() => {});
+  return () => subscription.remove();
 }

@@ -6,7 +6,7 @@ export interface Palette {
   border: string;
   primary: string;
   primaryLight: string;
-  overdue: string;
+  overdue: string; // text/icon color for overdue; readable on `card` and `overdueBg`
   overdueBg: string;
   dueSoon: string;
   dueSoonBg: string;
@@ -14,42 +14,55 @@ export interface Palette {
   okBg: string;
   danger: string;
   white: string;
+  // Ring segments and progress fills: brighter than the text colors above.
+  ringOverdue: string;
+  ringDueSoon: string;
+  ringOk: string;
+  track: string; // empty part of rings and bars
 }
 
 export const lightColors: Palette = {
-  background: '#F7F8FA',
+  background: '#F6F5FB',
   card: '#FFFFFF',
-  text: '#1A1D21',
-  textSecondary: '#6B7280',
-  border: '#E5E7EB',
-  primary: '#2563EB',
-  primaryLight: '#DBEAFE',
-  overdue: '#DC2626',
-  overdueBg: '#FEE2E2',
-  dueSoon: '#D97706',
-  dueSoonBg: '#FEF3C7',
-  ok: '#16A34A',
+  text: '#1E1B3A',
+  textSecondary: '#5E5A7A',
+  border: '#E6E4F2',
+  primary: '#4F46E5',
+  primaryLight: '#E6E4FD',
+  overdue: '#B4401A',
+  overdueBg: '#FDE8E1',
+  dueSoon: '#8A5A00',
+  dueSoonBg: '#FDF0D5',
+  ok: '#15803D',
   okBg: '#DCFCE7',
-  danger: '#DC2626',
+  danger: '#B4401A',
   white: '#FFFFFF',
+  ringOverdue: '#E5532D',
+  ringDueSoon: '#E0A21B',
+  ringOk: '#15803D',
+  track: '#ECEBF7',
 };
 
 export const darkColors: Palette = {
-  background: '#0F1115',
-  card: '#1A1D23',
-  text: '#F3F4F6',
-  textSecondary: '#9CA3AF',
-  border: '#2C313A',
-  primary: '#3B82F6',
-  primaryLight: '#1E3A5F',
-  overdue: '#F87171',
-  overdueBg: '#3A1D1D',
-  dueSoon: '#FBBF24',
-  dueSoonBg: '#3A2E12',
-  ok: '#34D399',
-  okBg: '#123527',
-  danger: '#F87171',
+  background: '#0B0C0E',
+  card: '#17191D',
+  text: '#F2F3F5',
+  textSecondary: '#A3A8B2',
+  border: '#26292F',
+  primary: '#6366F1',
+  primaryLight: '#25264A',
+  overdue: '#FF8A63',
+  overdueBg: '#3A1A10',
+  dueSoon: '#FFC53D',
+  dueSoonBg: '#2A2310',
+  ok: '#3DDC97',
+  okBg: '#13261E',
+  danger: '#FF8A63',
   white: '#FFFFFF',
+  ringOverdue: '#FF6B3D',
+  ringDueSoon: '#FFC53D',
+  ringOk: '#3DDC97',
+  track: '#23262C',
 };
 
 /**

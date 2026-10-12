@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -15,11 +16,23 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { parseISO } from 'date-fns';
 import { RootStackParamList } from '../navigation/RootNavigator';
-import { Category, Item } from '../types/Item';
-import { generateId, getItemById, insertItem, updateItem } from '../db/itemsRepository';
+import { Category, Item, ReplacementHistory } from '../types/Item';
+import {
+  addHistoryEntry,
+  generateId,
+  getItemById,
+  getLatestHistoryEntry,
+  insertItem,
+  setHistoryPrice,
+  updateItem,
+} from '../db/itemsRepository';
+import { getCurrencyCode } from '../services/priceSettings';
+import { centsToInput, parsePrice } from '../utils/money';
+import { reorderUrlFor } from '../utils/itemExtras';
 import { rescheduleReminderForItem } from '../notifications/notificationService';
 import { formatDate, todayISO, toISODate } from '../utils/dateCalculations';
 import CategoryPicker from '../components/CategoryPicker';
+import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../theme/ThemeContext';
 import { Palette } from '../theme/colors';
 import { makeTypography } from '../theme/typography';
@@ -43,6 +56,21 @@ export default function AddEditItemScreen({ navigation, route }: Props) {
   const [reminderEnabled, setReminderEnabled] = useState(true);
   const [reminderLeadDays, setReminderLeadDays] = useState('5');
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [barcode, setBarcode] = useState<string | undefined>(undefined);
+  // Why a scan left the name blank, shown under the barcode.
+  const [scanNote, setScanNote] = useState<string | null>(null);
+  const [price, setPrice] = useState('');
+  const [spares, setSparesText] = useState(''); // blank = not tracking spares
+  const [reorderUrl, setReorderUrl] = useState('');
+  // Editing: the price field edits the most recent replacement's price.
+  const [latestEntry, setLatestEntry] = useState<ReplacementHistory | null>(null);
+  const [currency, setCurrency] = useState('');
+  const scan = route.params?.scan;
+  const canScan = Platform.OS !== 'web';
+
+  useEffect(() => {
+    getCurrencyCode().then(setCurrency);
+  }, []);
 
   useEffect(() => {
     if (!itemId) return;
@@ -56,8 +84,35 @@ export default function AddEditItemScreen({ navigation, route }: Props) {
       setNotes(item.notes ?? '');
       setReminderEnabled(item.reminderEnabled);
       setReminderLeadDays(String(item.reminderLeadDays));
+      setBarcode(item.barcode);
+      setSparesText(item.spares != null ? String(item.spares) : '');
+      setReorderUrl(item.reorderUrl ?? '');
+    });
+    getLatestHistoryEntry(itemId).then((entry) => {
+      setLatestEntry(entry);
+      if (entry?.price != null) setPrice(centsToInput(entry.price));
     });
   }, [itemId]);
+
+  // A barcode scan (from the Dashboard or the Scan button below) arrives as a
+  // route param. Only fill fields the user hasn't typed into yet.
+  useEffect(() => {
+    if (!scan) return;
+    setBarcode(scan.barcode);
+    setScanNote(
+      scan.lookup === 'off'
+        ? 'Barcode added. Product lookup is off in Settings, so type the name.'
+        : scan.lookup === 'none'
+          ? 'Barcode added. No product details were found online for it, so type the name.'
+          : null
+    );
+    if (scan.name && !name.trim()) {
+      setName(scan.name);
+      if (scan.category) setCategory(scan.category);
+    }
+    if (scan.brand && !notes.trim()) setNotes(`Brand: ${scan.brand}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scan]);
 
   const handleSave = async () => {
     const trimmedName = name.trim();
@@ -75,6 +130,16 @@ export default function AddEditItemScreen({ navigation, route }: Props) {
       Alert.alert('Invalid lead days', 'Reminder lead days must be 0 or more.');
       return;
     }
+    const sparesCount = spares.trim() === '' ? undefined : parseInt(spares, 10);
+    if (sparesCount !== undefined && (isNaN(sparesCount) || sparesCount < 0)) {
+      Alert.alert('Invalid spares', 'Spares on hand must be 0 or more, or blank to not track them.');
+      return;
+    }
+    const priceCents = parsePrice(price);
+    if (price.trim() && priceCents == null) {
+      Alert.alert('Invalid price', 'Enter the price paid as a number, like 24.99, or leave it blank.');
+      return;
+    }
 
     const item: Item = {
       id: existing?.id ?? generateId(),
@@ -83,6 +148,10 @@ export default function AddEditItemScreen({ navigation, route }: Props) {
       lastReplacedDate,
       intervalDays: interval,
       notes: notes.trim() || undefined,
+      barcode,
+      spares: sparesCount,
+      reorderUrl: reorderUrl.trim() || undefined,
+      snoozedUntil: existing?.snoozedUntil,
       reminderEnabled,
       reminderLeadDays: leadDays,
       isCustom: existing?.isCustom ?? true,
@@ -91,8 +160,16 @@ export default function AddEditItemScreen({ navigation, route }: Props) {
 
     if (existing) {
       await updateItem(item);
+      if (latestEntry) {
+        if (priceCents !== (latestEntry.price ?? null)) await setHistoryPrice(latestEntry.id, priceCents);
+      } else if (priceCents != null) {
+        // No replacement recorded yet: count this price as the purchase on the last-replaced date.
+        await addHistoryEntry(item.id, lastReplacedDate, priceCents);
+      }
     } else {
       await insertItem(item);
+      // The first purchase counts toward the price trend, dated when it was replaced.
+      if (priceCents != null) await addHistoryEntry(item.id, lastReplacedDate, priceCents);
     }
     await rescheduleReminderForItem(item);
     navigation.goBack();
@@ -113,6 +190,39 @@ export default function AddEditItemScreen({ navigation, route }: Props) {
           placeholderTextColor={colors.textSecondary}
         />
 
+        <Text style={styles.label}>Barcode</Text>
+        <View style={styles.barcodeRow}>
+          <Text style={[typography.body, styles.barcodeText, !barcode && styles.barcodeEmpty]}>
+            {barcode ?? 'None'}
+          </Text>
+          {barcode && (
+            <Pressable
+              onPress={() => {
+                setBarcode(undefined);
+                setScanNote(null);
+              }}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel="Remove barcode"
+            >
+              <Ionicons name="close-circle-outline" size={22} color={colors.textSecondary} />
+            </Pressable>
+          )}
+          {canScan && (
+            <Pressable
+              style={styles.scanButton}
+              onPress={() => navigation.navigate('Scan', { mode: 'attach', itemId })}
+              accessibilityRole="button"
+              accessibilityLabel="Scan barcode"
+            >
+              <Ionicons name="barcode-outline" size={20} color={colors.white} />
+              <Text style={styles.scanButtonText}>Scan</Text>
+            </Pressable>
+          )}
+        </View>
+
+        {scanNote && barcode && <Text style={styles.hint}>{scanNote}</Text>}
+
         <Text style={styles.label}>Category</Text>
         <CategoryPicker value={category} onChange={setCategory} />
 
@@ -125,14 +235,69 @@ export default function AddEditItemScreen({ navigation, route }: Props) {
             value={parseISO(lastReplacedDate)}
             mode="date"
             maximumDate={new Date()}
-            onChange={(event, date) => {
+            onValueChange={(_event, date) => {
               setShowDatePicker(Platform.OS === 'ios');
-              if (event.type !== 'dismissed' && date) {
-                setLastReplacedDate(toISODate(date));
-              }
+              setLastReplacedDate(toISODate(date));
             }}
+            onDismiss={() => setShowDatePicker(false)}
           />
         )}
+
+        <Text style={styles.label}>
+          {itemId ? 'Last price paid' : 'Price paid'}
+          {currency ? ` (${currency})` : ''}
+        </Text>
+        <TextInput
+          style={styles.input}
+          value={price}
+          onChangeText={setPrice}
+          placeholder="Optional, e.g. 24.99"
+          placeholderTextColor={colors.textSecondary}
+          keyboardType="decimal-pad"
+          accessibilityLabel="Price paid"
+        />
+        {itemId && latestEntry && (
+          <Text style={styles.hint}>For the replacement on {formatDate(latestEntry.replacedDate)}.</Text>
+        )}
+        {(barcode || name.trim()) && (
+          <Pressable
+            style={styles.priceLink}
+            onPress={() =>
+              Linking.openURL(reorderUrlFor({ barcode, name: name.trim() })).catch(() => {})
+            }
+            hitSlop={8}
+            accessibilityRole="link"
+          >
+            <Ionicons name="pricetag-outline" size={16} color={colors.primary} />
+            <Text style={styles.priceLinkText}>Check price online</Text>
+          </Pressable>
+        )}
+
+        <Text style={styles.label}>Spares on hand</Text>
+        <TextInput
+          style={styles.input}
+          value={spares}
+          onChangeText={setSparesText}
+          placeholder="Leave blank to not track spares"
+          placeholderTextColor={colors.textSecondary}
+          keyboardType="number-pad"
+          accessibilityLabel="Spares on hand"
+        />
+        <Text style={styles.hint}>Each Mark Replaced uses one. You'll be told when you run out.</Text>
+
+        <Text style={styles.label}>Reorder link</Text>
+        <TextInput
+          style={styles.input}
+          value={reorderUrl}
+          onChangeText={setReorderUrl}
+          placeholder="Optional, e.g. a store's product page"
+          placeholderTextColor={colors.textSecondary}
+          keyboardType="url"
+          autoCapitalize="none"
+          autoCorrect={false}
+          accessibilityLabel="Reorder link"
+        />
+        <Text style={styles.hint}>Without a link, Reorder searches stores for the barcode or name.</Text>
 
         <Text style={styles.label}>Interval (days)</Text>
         <TextInput
@@ -207,6 +372,10 @@ const makeStyles = (colors: Palette) => {
     padding: 16,
     paddingBottom: 48,
   },
+  hint: {
+    ...typography.caption,
+    marginTop: 4,
+  },
   label: {
     ...typography.label,
     marginTop: 16,
@@ -221,6 +390,51 @@ const makeStyles = (colors: Palette) => {
     paddingVertical: 12,
     fontSize: 16,
     color: colors.text,
+  },
+  barcodeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingLeft: 14,
+    paddingRight: 6,
+    paddingVertical: 6,
+    minHeight: 48,
+  },
+  barcodeText: {
+    flex: 1,
+  },
+  barcodeEmpty: {
+    color: colors.textSecondary,
+  },
+  scanButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  scanButtonText: {
+    color: colors.white,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  priceLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    marginTop: 8,
+  },
+  priceLinkText: {
+    color: colors.primary,
+    fontSize: 14,
+    fontWeight: '600',
   },
   notesInput: {
     minHeight: 80,

@@ -1,21 +1,24 @@
 import React, { useCallback, useState } from 'react';
-import { FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Linking, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import { RootStackParamList } from '../navigation/RootNavigator';
 import { Item, ReplacementHistory } from '../types/Item';
-import {
-  deleteItem,
-  getHistoryForItem,
-  getItemById,
-  markReplaced,
-} from '../db/itemsRepository';
+import { deleteItem, getHistoryForItem, getItemById, setSpares } from '../db/itemsRepository';
 import {
   cancelReminderForItem,
   rescheduleReminderForItem,
+  snoozeItem,
 } from '../notifications/notificationService';
+import { getCurrencyCode } from '../services/priceSettings';
+import { useMarkReplaced } from '../hooks/useMarkReplaced';
 import { dueSummary, formatDate, formatDueDate, getStatus, todayISO } from '../utils/dateCalculations';
+import { isSnoozed, reorderUrlFor, snoozeLabel, sparesLabel } from '../utils/itemExtras';
+import { entryCost, lastPriceByItem } from '../utils/priceTrends';
+import SnoozeSheet from '../components/SnoozeSheet';
+import { formatMoney } from '../utils/money';
+import PriceTrendCard from '../components/PriceTrendCard';
 import { categoryColors } from '../utils/categoryIcons';
 import StatusBadge from '../components/StatusBadge';
 import DueProgressBar from '../components/DueProgressBar';
@@ -33,12 +36,17 @@ export default function ItemDetailScreen({ navigation, route }: Props) {
   const [item, setItem] = useState<Item | null>(null);
   const [history, setHistory] = useState<ReplacementHistory[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [currency, setCurrency] = useState('');
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
+  const { markReplacedWithPrice, editPrice, priceSheet } = useMarkReplaced();
 
   const load = useCallback(async () => {
     const loaded = await getItemById(itemId);
     setItem(loaded);
     if (loaded) {
-      setHistory(await getHistoryForItem(itemId));
+      const [entries, code] = await Promise.all([getHistoryForItem(itemId), getCurrencyCode()]);
+      setHistory(entries);
+      setCurrency(code);
       navigation.setOptions({ title: loaded.name });
     }
   }, [itemId, navigation]);
@@ -51,11 +59,23 @@ export default function ItemDetailScreen({ navigation, route }: Props) {
 
   const handleMarkReplaced = async () => {
     if (!item) return;
-    await markReplaced(item.id, todayISO());
+    await markReplacedWithPrice(item, load);
+    await load();
+  };
+
+  const changeSpares = async (next: number | null) => {
+    if (!item) return;
+    await setSpares(item.id, next);
+    // The reminder text mentions when spares run out.
     const updated = await getItemById(item.id);
-    if (updated) {
-      await rescheduleReminderForItem(updated);
-    }
+    if (updated) await rescheduleReminderForItem(updated);
+    await load();
+  };
+
+  const handleSnooze = async (days: number | null) => {
+    setSnoozeOpen(false);
+    if (!item) return;
+    await snoozeItem(item.id, days);
     await load();
   };
 
@@ -72,6 +92,9 @@ export default function ItemDetailScreen({ navigation, route }: Props) {
   }
 
   const status = getStatus(item);
+  const snoozed = isSnoozed(item, todayISO());
+  const spares = sparesLabel(item);
+  const lastPrice = lastPriceByItem(history).get(item.id);
 
   return (
     <>
@@ -118,6 +141,44 @@ export default function ItemDetailScreen({ navigation, route }: Props) {
                 {item.reminderEnabled ? `${item.reminderLeadDays} days before due` : 'Off'}
               </Text>
             </View>
+            {snoozed && (
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>{snoozeLabel(item.snoozedUntil as string)}</Text>
+                <Pressable onPress={() => handleSnooze(null)} hitSlop={8} accessibilityRole="button">
+                  <Text style={styles.link}>Stop snoozing</Text>
+                </Pressable>
+              </View>
+            )}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Spares on hand</Text>
+              {spares == null ? (
+                <Pressable onPress={() => changeSpares(0)} hitSlop={8} accessibilityRole="button">
+                  <Text style={styles.link}>Track spares</Text>
+                </Pressable>
+              ) : (
+                <View style={styles.stepper}>
+                  <Pressable
+                    onPress={() => changeSpares(Math.max(0, (item.spares ?? 0) - 1))}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="One fewer spare"
+                  >
+                    <Ionicons name="remove-circle-outline" size={24} color={colors.primary} />
+                  </Pressable>
+                  <Text style={[typography.body, item.spares === 0 && { color: colors.dueSoon }]}>
+                    {spares}
+                  </Text>
+                  <Pressable
+                    onPress={() => changeSpares((item.spares ?? 0) + 1)}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="One more spare"
+                  >
+                    <Ionicons name="add-circle-outline" size={24} color={colors.primary} />
+                  </Pressable>
+                </View>
+              )}
+            </View>
             {item.notes ? (
               <View style={styles.notes}>
                 <Text style={styles.detailLabel}>Notes</Text>
@@ -131,6 +192,17 @@ export default function ItemDetailScreen({ navigation, route }: Props) {
             <Text style={styles.replaceButtonText}>Mark as Replaced Today</Text>
           </Pressable>
 
+          <Pressable
+            style={[styles.secondaryButton, styles.reorderButton]}
+            onPress={() => Linking.openURL(reorderUrlFor(item)).catch(() => {})}
+            accessibilityRole="link"
+          >
+            <Ionicons name="cart-outline" size={18} color={colors.primary} />
+            <Text style={styles.secondaryButtonText}>
+              Reorder{lastPrice != null && currency ? ` · last paid ${formatMoney(lastPrice, currency)}` : ''}
+            </Text>
+          </Pressable>
+
           <View style={styles.actionsRow}>
             <Pressable
               style={styles.secondaryButton}
@@ -139,21 +211,57 @@ export default function ItemDetailScreen({ navigation, route }: Props) {
               <Ionicons name="pencil-outline" size={18} color={colors.primary} />
               <Text style={styles.secondaryButtonText}>Edit</Text>
             </Pressable>
+            <Pressable style={styles.secondaryButton} onPress={() => setSnoozeOpen(true)}>
+              <Ionicons name="alarm-outline" size={18} color={colors.primary} />
+              <Text style={styles.secondaryButtonText}>Later</Text>
+            </Pressable>
             <Pressable style={styles.secondaryButton} onPress={() => setConfirmDelete(true)}>
               <Ionicons name="trash-outline" size={18} color={colors.danger} />
               <Text style={[styles.secondaryButtonText, { color: colors.danger }]}>Delete</Text>
             </Pressable>
           </View>
 
+          <PriceTrendCard history={history} intervalDays={item.intervalDays} currency={currency} />
+
           <Text style={styles.historyHeader}>Replacement History</Text>
+          {history.length > 0 && (
+            <Text style={styles.historyHint}>
+              Tap a replacement to add its price, contractor cost or notes.
+            </Text>
+          )}
         </>
       }
-      renderItem={({ item: entry }) => (
-        <View style={styles.historyRow}>
-          <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
-          <Text style={typography.body}>{formatDate(entry.replacedDate)}</Text>
-        </View>
-      )}
+      renderItem={({ item: entry }) => {
+        const cost = entryCost(entry);
+        const details = [
+          entry.doneBy ? `By ${entry.doneBy}` : null,
+          entry.labor != null ? `incl. ${formatMoney(entry.labor, currency)} labor` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        return (
+          <Pressable
+            style={({ pressed }) => [styles.historyRow, pressed && { opacity: 0.7 }]}
+            onPress={() => editPrice(entry, item.name, load)}
+            accessibilityRole="button"
+            accessibilityLabel={`${formatDate(entry.replacedDate)}, ${
+              cost != null ? formatMoney(cost, currency) : 'no price'
+            }. Edit details`}
+          >
+            <Ionicons name="time-outline" size={16} color={colors.textSecondary} style={styles.historyIcon} />
+            <View style={{ flex: 1 }}>
+              <Text style={typography.body}>{formatDate(entry.replacedDate)}</Text>
+              {details ? <Text style={styles.historyMeta}>{details}</Text> : null}
+              {entry.note ? <Text style={styles.historyMeta}>{entry.note}</Text> : null}
+            </View>
+            {cost != null ? (
+              <Text style={typography.label}>{formatMoney(cost, currency)}</Text>
+            ) : (
+              <Text style={styles.addPrice}>Add price</Text>
+            )}
+          </Pressable>
+        );
+      }}
       ListEmptyComponent={<Text style={styles.emptyHistory}>No replacements recorded yet.</Text>}
     />
 
@@ -186,6 +294,14 @@ export default function ItemDetailScreen({ navigation, route }: Props) {
         </View>
       </View>
     </Modal>
+    {priceSheet}
+    <SnoozeSheet
+      visible={snoozeOpen}
+      itemName={item.name}
+      snoozed={snoozed}
+      onPick={handleSnooze}
+      onDismiss={() => setSnoozeOpen(false)}
+    />
     </>
   );
 }
@@ -292,9 +408,38 @@ const makeStyles = (colors: Palette) => {
     marginTop: 24,
     marginBottom: 8,
   },
-  historyRow: {
+  link: {
+    ...typography.label,
+    color: colors.primary,
+  },
+  stepper: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 10,
+  },
+  reorderButton: {
+    flex: 0,
+    marginTop: 12,
+  },
+  historyIcon: {
+    marginTop: 3,
+  },
+  historyMeta: {
+    ...typography.caption,
+    marginTop: 2,
+  },
+  historyHint: {
+    ...typography.caption,
+    marginTop: -4,
+    marginBottom: 8,
+  },
+  addPrice: {
+    ...typography.caption,
+    color: colors.primary,
+  },
+  historyRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
     gap: 8,
     backgroundColor: colors.card,
     borderWidth: 1,

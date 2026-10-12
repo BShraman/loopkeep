@@ -52,6 +52,42 @@ async function migrate(database: SQLite.SQLiteDatabase): Promise<void> {
       value TEXT NOT NULL
     );
   `);
+
+  // Added after 1.0: product barcode for scan-to-match. Older installs get the
+  // column added once; CREATE TABLE above stays as shipped.
+  const columns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(items)');
+  if (!columns.some((c) => c.name === 'barcode')) {
+    await database.execAsync('ALTER TABLE items ADD COLUMN barcode TEXT');
+  }
+  await database.execAsync('CREATE INDEX IF NOT EXISTS idx_items_barcode ON items(barcode)');
+
+  // Added with price history: what was paid for each replacement, in whole
+  // cents (null when the user skipped it).
+  await addColumnIfMissing(database, 'replacement_history', 'priceCents', 'INTEGER');
+
+  // Added with spares, snooze and replacement notes.
+  await addColumnIfMissing(database, 'items', 'sparesCount', 'INTEGER'); // null = not tracking
+  await addColumnIfMissing(database, 'items', 'reorderUrl', 'TEXT');
+  await addColumnIfMissing(database, 'items', 'snoozedUntil', 'TEXT');
+  await addColumnIfMissing(database, 'replacement_history', 'laborCents', 'INTEGER');
+  await addColumnIfMissing(database, 'replacement_history', 'doneBy', 'TEXT');
+  await addColumnIfMissing(database, 'replacement_history', 'note', 'TEXT');
+  await database.execAsync(
+    'CREATE INDEX IF NOT EXISTS idx_history_date ON replacement_history(replacedDate)'
+  );
+}
+
+/** Add a column to an existing table once; CREATE TABLE above stays as shipped. */
+async function addColumnIfMissing(
+  database: SQLite.SQLiteDatabase,
+  table: string,
+  column: string,
+  type: string
+): Promise<void> {
+  const columns = await database.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
+  if (!columns.some((c) => c.name === column)) {
+    await database.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
 }
 
 export async function getSetting(key: string): Promise<string | null> {
